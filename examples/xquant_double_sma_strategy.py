@@ -14,8 +14,11 @@ sys.path.insert(0, str(project_root / "python"))
 from rustbroker.api import BacktestEngine, BacktestConfig
 from rustbroker.strategy import Strategy
 from rustbroker.indicators import Indicator
-from rustbroker.data import load_csv_to_bars
-
+from rustbroker.market_data import (  # type: ignore[attr-defined]
+    DataRequest,
+    MarketDataConfig,
+    MarketDataService,
+)
 
 class DoubleMAStrategy(Strategy):
     """双均线策略：快速均线在慢均线上面时全仓买入，否则空仓"""
@@ -27,8 +30,8 @@ class DoubleMAStrategy(Strategy):
         
         # 尝试使用预计算指标（如果 Rust 引擎支持）
         
-        ctx.register_indicator("sma_5", Indicator.sma(period=50, field="close"))   # 5日均线
-        ctx.register_indicator("sma_20", Indicator.sma(period=200, field="close")) # 20日均线
+        ctx.register_indicator("sma_5", Indicator.sma(period=5, field="close"))   # 5日均线
+        ctx.register_indicator("sma_20", Indicator.sma(period=20, field="close")) # 20日均线
         print("register sma_5 and sma_20")
 
     
@@ -89,18 +92,18 @@ class DoubleMAStrategy(Strategy):
     
     def on_trade(self, fill, ctx):
         """订单成交回调"""
-        # side_str = "买入" if fill['side'] == 'buy' else "卖出"
-        # quantity_shares = fill.get('filled_quantity', 0) * 100  # 转换为股数
+        side_str = "买入" if fill['side'] == 'buy' else "卖出"
+        quantity_shares = fill.get('filled_quantity', 0) * 100  # 转换为股数
         
-        # # 格式化时间
-        # timestamp_str = fill.get('timestamp', '')
+        # 格式化时间
+        timestamp_str = fill.get('timestamp', '')
      
-        # # 解析 RFC3339 格式的时间字符串
-        # dt = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
-        # # 转换为本地时间格式（去掉时区信息）
-        # time_str = dt.strftime('%Y-%m-%d %H:%M:%S')
+        # 解析 RFC3339 格式的时间字符串
+        dt = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+        # 转换为本地时间格式（去掉时区信息）
+        time_str = dt.strftime('%Y-%m-%d %H:%M:%S')
        
-        # print(f"{time_str} 成交: {side_str} {fill['symbol']} {quantity_shares:.0f}股 @ {fill.get('price', 0):.4f}元 (手续费: {fill.get('commission', 0):.2f}元)")
+        print(f"{time_str} 成交: {side_str} {fill['symbol']} {quantity_shares:.0f}股 @ {fill.get('price', 0):.4f}元 (手续费: {fill.get('commission', 0):.2f}元)")
     
     def on_stop(self, ctx):
         """回测结束回调"""
@@ -118,43 +121,49 @@ def main():
         min_commission=0.0,         # 最小手续费5元（A股标准）
         slippage_bps=1.0,           # 滑点 1 bps
         stamp_tax_rate=0.001,       # 印花税率 0.1%（卖出时收取）
-        period = "1m" # 周期
+        period = "1d" # 周期
     )
     
     # 创建回测引擎
     engine = BacktestEngine(cfg)
     
+    symbol_list = ["513500.SH"]
+    db_path = os.path.join(os.path.dirname(__file__), "..", "data", "backtest.db")
+    xtdata_dir = os.environ.get("XTDATA_DIR", r"D:\国金证券QMT交易端\userdata_mini")
+
+    config = MarketDataConfig(
+        db_path=db_path,
+        xtdata_enabled=True,
+        xtdata_data_dir=xtdata_dir,
+    )
+
+    service = MarketDataService(config)
+    market_data  = {}
+    for symbol in symbol_list:
+        request = DataRequest(symbols=[symbol],period=cfg.period,start_time=cfg.start,end_time=cfg.end,count=-1)
+        bars = service.fetch_bars(request, symbol=symbol)
+        if not bars:
+            print(f"[{symbol}] No data returned from xtdata/DB.")
+            continue
+
+        market_data = {symbol: bars}
+
     # 1. 加载行情数据（基准时间线）
     # 基准时间线：策略执行的时间基准，所有计算都基于这个时间线
-    data_path = os.path.join(os.path.dirname(__file__), "data", "sh600000_min.csv")
-    symbol = "600000.SH"
-    benchmark_bars = load_csv_to_bars(data_path, symbol=symbol)  # 基准时间线 = 600000.SH 的行情数据
-    
+    symbol = "000300.SH"
+    request = DataRequest(symbols=[symbol],period=cfg.period,start_time=cfg.start,end_time=cfg.end,count=-1)
+    benchmark_bars = service.fetch_bars(request, symbol=symbol)
     if not benchmark_bars:
-        print(f"错误：无法加载数据文件 {data_path}")
+        print(f"错误：无法加载数据文件 {symbol}")
         return
     
     print(f"加载了 {len(benchmark_bars)} 根 K 线数据")
     print(f"数据范围: {benchmark_bars[0]['datetime']} 到 {benchmark_bars[-1]['datetime']}")
     
-    # 2. 准备行情数据字典（用于添加到引擎）
-    # 行情数据通过 data 参数传入，格式为 {symbol: [bars]}
-    market_data = {symbol: benchmark_bars}
-    
-    # 3. 准备基准数据（基准时间线）
-    # 基准数据通过 benchmark 参数传入，格式为 {benchmark_name: [bars]}
-    # 在本示例中，基准就是行情数据本身
     benchmark_data = {"BENCH": benchmark_bars}
     
     # 4. 创建策略实例
     strategy = DoubleMAStrategy()
-    # 5. 运行回测
-    # 引擎会：
-    #   - 添加行情数据（market_data）到引擎
-    #   - 调用策略的 on_start 方法，策略在 on_start 中注册和计算指标
-    #   - 按照基准时间线（benchmark_data）逐根 bar 执行策略
-    #   - 策略在每根 bar 时获取对应的指标值和行情数据，所有计算都对齐到基准时间线
-    # 注意：指标注册和计算应该在策略的 on_start 方法中进行，这样有利于时间线对齐
     print("\n开始回测...")
     result = engine.run(
         strategy, 

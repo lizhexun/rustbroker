@@ -8,6 +8,7 @@ use crate::types::{Bar, Order, OrderSide, PortfolioState, QuantityType};
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use pyo3::wrap_pyfunction;
 use std::collections::HashMap;
 
 /// Backtest configuration
@@ -21,6 +22,7 @@ pub struct BacktestConfig {
     pub slippage_bps: f64,
     pub stamp_tax_rate: f64,
     pub t0_symbols: Vec<String>,
+    pub period: Option<String>,
 }
 
 impl Default for BacktestConfig {
@@ -34,6 +36,7 @@ impl Default for BacktestConfig {
             slippage_bps: 1.0,
             stamp_tax_rate: 0.001,
             t0_symbols: Vec::new(),
+            period: None,
         }
     }
 }
@@ -209,12 +212,14 @@ pub struct PyBacktestConfig {
     pub stamp_tax_rate: f64,
     #[pyo3(get, set)]
     pub t0_symbols: Vec<String>,
+    #[pyo3(get, set)]
+    pub period: Option<String>,
 }
 
 #[pymethods]
 impl PyBacktestConfig {
     #[new]
-    #[pyo3(signature = (start=None, end=None, cash=None, commission_rate=None, min_commission=None, slippage_bps=None, stamp_tax_rate=None, t0_symbols=None))]
+    #[pyo3(signature = (start=None, end=None, cash=None, commission_rate=None, min_commission=None, slippage_bps=None, stamp_tax_rate=None, t0_symbols=None, period=None))]
     fn new(
         start: Option<String>,
         end: Option<String>,
@@ -224,6 +229,7 @@ impl PyBacktestConfig {
         slippage_bps: Option<f64>,
         stamp_tax_rate: Option<f64>,
         t0_symbols: Option<Vec<String>>,
+        period: Option<String>,
     ) -> Self {
         Self {
             start,
@@ -234,6 +240,7 @@ impl PyBacktestConfig {
             slippage_bps: slippage_bps.unwrap_or(1.0),
             stamp_tax_rate: stamp_tax_rate.unwrap_or(0.001),
             t0_symbols: t0_symbols.unwrap_or_default(),
+            period,
         }
     }
 }
@@ -256,6 +263,7 @@ impl PyBacktestEngine {
             slippage_bps: config.slippage_bps,
             stamp_tax_rate: config.stamp_tax_rate,
             t0_symbols: config.t0_symbols.clone(),
+            period: config.period.clone(),
         };
         Self {
             engine: BacktestEngine::new(rust_config),
@@ -573,6 +581,14 @@ pub fn register_module(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyBacktestEngine>()?;
     m.add_class::<PyBar>()?;
     m.add_class::<PyFill>()?;
+    
+    // Register database functions
+    m.add_function(wrap_pyfunction!(crate::database::get_market_data, m)?)?;
+    m.add_function(wrap_pyfunction!(crate::database::save_klines, m)?)?;
+    m.add_function(wrap_pyfunction!(crate::database::save_klines_from_csv, m)?)?;
+    m.add_function(wrap_pyfunction!(crate::database::resample_klines, m)?)?;
+    m.add_function(wrap_pyfunction!(crate::database::load_and_synthesize_klines, m)?)?;
+    
     Ok(())
 }
 

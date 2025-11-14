@@ -20,6 +20,7 @@ class BacktestConfig:
         slippage_bps: float = 1.0,
         stamp_tax_rate: float = 0.001,
         t0_symbols: Optional[List[str]] = None,
+        period: Optional[str] = None,
     ):
         self.start = start
         self.end = end
@@ -29,6 +30,7 @@ class BacktestConfig:
         self.slippage_bps = slippage_bps
         self.stamp_tax_rate = stamp_tax_rate
         self.t0_symbols = t0_symbols or []
+        self.period = period
 
 
 class BacktestEngine:
@@ -45,6 +47,7 @@ class BacktestEngine:
             slippage_bps=config.slippage_bps,
             stamp_tax_rate=config.stamp_tax_rate,
             t0_symbols=config.t0_symbols,
+            period=config.period,
         )
         self._rust_engine = PyBacktestEngine(self._rust_config)
         self._strategy = None
