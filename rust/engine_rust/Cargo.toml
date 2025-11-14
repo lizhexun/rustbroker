@@ -1,0 +1,17 @@
+[package]
+name = "engine_rust"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["pyrust-bt"]
+description = "Rust core backtest engine with PyO3 bindings"
+
+[lib]
+name = "engine_rust"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.21", features = ["extension-module", "abi3-py38"] }
+chrono = "0.4"
+duckdb = { version = "1.0", features = ["bundled"] }
+ta = "0.5"

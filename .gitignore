@@ -1,0 +1,82 @@
+target/
+**/__pycache__/
+*.pyc
+*.pyd
+*.so
+*.dll
+*.egg-info/
+.venv/
+.maturin/ 
+
+.env
+CLAUDE.md
+
+# --- Rust ---
+/target/
+rust/engine_rust/rustup-init.exe
+
+# --- Python ---
+**/__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.dll
+*.dylib
+*.egg-info/
+.dist-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.ipynb_checkpoints
+.tox/
+.cache/
+
+# Coverage
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Maturin / Wheels
+.maturin/
+wheelhouse/
+
+# Logs
+*.log
+logs/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.code-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env / Secrets
+.env
+.env.*
+!.env.example
+.streamlit/secrets.toml
+
+# Data (keep only sample)
+examples/data/*
+!examples/data/sh600000_min.csv
+!examples/data/sample.csv
+!examples/data/.gitkeep
+# generated analysis exports
+examples/data/trades_out.csv
+examples/data/round_trips.csv 
+
+examples/results/*
+
+doc/*md
+*.db
