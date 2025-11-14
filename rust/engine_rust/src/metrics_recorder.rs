@@ -40,8 +40,8 @@ impl MetricsRecorder {
 
     /// Calculate performance statistics
     pub fn calculate_stats(&self) -> PerformanceStats {
-        if self.equity_curve.is_empty() {
-            return PerformanceStats {
+        let strategy_stats = if self.equity_curve.is_empty() {
+            PerformanceStats {
                 total_return: 0.0,
                 annualized_return: 0.0,
                 max_drawdown: 0.0,
@@ -52,17 +52,89 @@ impl MetricsRecorder {
                 profit_loss_ratio: 0.0,
                 open_count: 0,
                 close_count: 0,
+                benchmark_return: None,
+                benchmark_annualized_return: None,
+                benchmark_max_drawdown: None,
+                benchmark_max_drawdown_start: None,
+                benchmark_max_drawdown_end: None,
+            }
+        } else {
+            let initial_equity = self.equity_curve[0].equity;
+            let final_equity = self.equity_curve.last().unwrap().equity;
+            let total_return = (final_equity - initial_equity) / initial_equity;
+
+            // Calculate annualized return
+            let days = if self.equity_curve.len() > 1 {
+                let duration = self.equity_curve.last().unwrap().datetime
+                    - self.equity_curve[0].datetime;
+                duration.num_days() as f64
+            } else {
+                1.0
             };
+            let years = days / 365.25;
+            let annualized_return = if years > 0.0 {
+                (final_equity / initial_equity).powf(1.0 / years) - 1.0
+            } else {
+                total_return
+            };
+
+            // Calculate max drawdown
+            let (max_drawdown, max_dd_start, max_dd_end) = self.calculate_max_drawdown_with_period();
+
+            // Calculate Sharpe ratio
+            let sharpe_ratio = self.calculate_sharpe_ratio();
+
+            // Calculate win rate and profit/loss ratio
+            let (win_rate, profit_loss_ratio) = self.calculate_trade_stats();
+
+            // Count open and close trades
+            let open_count = self.fills.iter()
+                .filter(|f| matches!(f.side, crate::types::OrderSide::Buy))
+                .count();
+            let close_count = self.fills.iter()
+                .filter(|f| matches!(f.side, crate::types::OrderSide::Sell))
+                .count();
+
+            // Calculate benchmark statistics
+            let (benchmark_return, benchmark_annualized_return, benchmark_max_dd, benchmark_max_dd_start, benchmark_max_dd_end) = 
+                self.calculate_benchmark_stats();
+
+            PerformanceStats {
+                total_return,
+                annualized_return,
+                max_drawdown,
+                max_drawdown_start: max_dd_start,
+                max_drawdown_end: max_dd_end,
+                sharpe_ratio,
+                win_rate,
+                profit_loss_ratio,
+                open_count,
+                close_count,
+                benchmark_return,
+                benchmark_annualized_return,
+                benchmark_max_drawdown: benchmark_max_dd,
+                benchmark_max_drawdown_start: benchmark_max_dd_start,
+                benchmark_max_drawdown_end: benchmark_max_dd_end,
+            }
+        };
+
+        strategy_stats
+    }
+
+    /// Calculate benchmark statistics
+    fn calculate_benchmark_stats(&self) -> (Option<f64>, Option<f64>, Option<f64>, Option<DateTime<Utc>>, Option<DateTime<Utc>>) {
+        if self.benchmark_curve.is_empty() {
+            return (None, None, None, None, None);
         }
 
-        let initial_equity = self.equity_curve[0].equity;
-        let final_equity = self.equity_curve.last().unwrap().equity;
+        let initial_equity = self.benchmark_curve[0].equity;
+        let final_equity = self.benchmark_curve.last().unwrap().equity;
         let total_return = (final_equity - initial_equity) / initial_equity;
 
         // Calculate annualized return
-        let days = if self.equity_curve.len() > 1 {
-            let duration = self.equity_curve.last().unwrap().datetime
-                - self.equity_curve[0].datetime;
+        let days = if self.benchmark_curve.len() > 1 {
+            let duration = self.benchmark_curve.last().unwrap().datetime
+                - self.benchmark_curve[0].datetime;
             duration.num_days() as f64
         } else {
             1.0
@@ -75,34 +147,47 @@ impl MetricsRecorder {
         };
 
         // Calculate max drawdown
-        let (max_drawdown, max_dd_start, max_dd_end) = self.calculate_max_drawdown_with_period();
+        let (max_drawdown, max_dd_start, max_dd_end) = self.calculate_benchmark_max_drawdown_with_period();
 
-        // Calculate Sharpe ratio
-        let sharpe_ratio = self.calculate_sharpe_ratio();
+        (Some(total_return), Some(annualized_return), Some(max_drawdown), max_dd_start, max_dd_end)
+    }
 
-        // Calculate win rate and profit/loss ratio
-        let (win_rate, profit_loss_ratio) = self.calculate_trade_stats();
-
-        // Count open and close trades
-        let open_count = self.fills.iter()
-            .filter(|f| matches!(f.side, crate::types::OrderSide::Buy))
-            .count();
-        let close_count = self.fills.iter()
-            .filter(|f| matches!(f.side, crate::types::OrderSide::Sell))
-            .count();
-
-        PerformanceStats {
-            total_return,
-            annualized_return,
-            max_drawdown,
-            max_drawdown_start: max_dd_start,
-            max_drawdown_end: max_dd_end,
-            sharpe_ratio,
-            win_rate,
-            profit_loss_ratio,
-            open_count,
-            close_count,
+    /// Calculate benchmark maximum drawdown with period information
+    fn calculate_benchmark_max_drawdown_with_period(&self) -> (f64, Option<DateTime<Utc>>, Option<DateTime<Utc>>) {
+        if self.benchmark_curve.is_empty() {
+            return (0.0, None, None);
         }
+
+        let mut max_equity = self.benchmark_curve[0].equity;
+        let mut max_equity_time = self.benchmark_curve[0].datetime;
+        let mut max_dd = 0.0;
+        let mut max_dd_start: Option<DateTime<Utc>> = None;
+        let mut max_dd_end: Option<DateTime<Utc>> = None;
+        let mut current_dd_start: Option<DateTime<Utc>> = None;
+
+        for point in &self.benchmark_curve {
+            if point.equity > max_equity {
+                // New peak reached, reset drawdown tracking
+                max_equity = point.equity;
+                max_equity_time = point.datetime;
+                current_dd_start = None;
+            } else {
+                // In drawdown
+                if current_dd_start.is_none() {
+                    // Start of a new drawdown period
+                    current_dd_start = Some(max_equity_time);
+                }
+                
+                let drawdown = (max_equity - point.equity) / max_equity;
+                if drawdown > max_dd {
+                    max_dd = drawdown;
+                    max_dd_start = current_dd_start;
+                    max_dd_end = Some(point.datetime);
+                }
+            }
+        }
+
+        (max_dd, max_dd_start, max_dd_end)
     }
 
     /// Calculate maximum drawdown

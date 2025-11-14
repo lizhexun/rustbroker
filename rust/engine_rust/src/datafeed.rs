@@ -13,6 +13,7 @@ impl DataFeed {
 
 pub struct DataFeed {
     benchmark_timeline: Vec<DateTime<Utc>>,
+    benchmark_bars: Vec<Bar>,  // Store benchmark bars for equity calculation
     market_data: HashMap<String, Vec<Bar>>,
     current_index: usize,
     // Cache: symbol -> current bar index in that symbol's data
@@ -23,6 +24,7 @@ impl DataFeed {
     pub fn new() -> Self {
         Self {
             benchmark_timeline: Vec::new(),
+            benchmark_bars: Vec::new(),
             market_data: HashMap::new(),
             current_index: 0,
             symbol_indices: HashMap::new(),
@@ -46,6 +48,7 @@ impl DataFeed {
         let mut sorted_bars = benchmark_bars;
         sorted_bars.sort_by_key(|b| b.datetime);
         self.benchmark_timeline = sorted_bars.iter().map(|b| b.datetime).collect();
+        self.benchmark_bars = sorted_bars;
         // Initialize symbol indices using binary search
         self._update_all_symbol_indices();
     }
@@ -163,6 +166,20 @@ impl DataFeed {
     /// Get current datetime
     pub fn get_current_datetime(&self) -> Option<DateTime<Utc>> {
         self.benchmark_timeline.get(self.current_index).copied()
+    }
+
+    /// Get current benchmark bar
+    pub fn get_current_benchmark_bar(&self) -> Option<Bar> {
+        if self.current_index < self.benchmark_bars.len() {
+            Some(self.benchmark_bars[self.current_index].clone())
+        } else {
+            None
+        }
+    }
+
+    /// Get initial benchmark bar (first bar)
+    pub fn get_initial_benchmark_bar(&self) -> Option<Bar> {
+        self.benchmark_bars.first().cloned()
     }
 
     /// Move to next bar

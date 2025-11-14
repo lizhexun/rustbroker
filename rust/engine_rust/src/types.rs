@@ -162,5 +162,11 @@ pub struct PerformanceStats {
     pub profit_loss_ratio: f64,
     pub open_count: usize,   // 开仓次数（买入成交次数）
     pub close_count: usize,  // 平仓次数（卖出成交次数）
+    // Benchmark statistics
+    pub benchmark_return: Option<f64>,
+    pub benchmark_annualized_return: Option<f64>,
+    pub benchmark_max_drawdown: Option<f64>,
+    pub benchmark_max_drawdown_start: Option<DateTime<chrono::Utc>>,
+    pub benchmark_max_drawdown_end: Option<DateTime<chrono::Utc>>,
 }
 

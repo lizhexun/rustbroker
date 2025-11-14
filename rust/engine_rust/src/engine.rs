@@ -139,6 +139,19 @@ impl BacktestEngine {
                 .collect();
             let equity = self.portfolio.calculate_equity(&current_prices);
             self.metrics.record_equity(datetime, equity);
+            
+            // Record benchmark equity (based on benchmark bar close price)
+            if let Some(benchmark_bar) = self.datafeed.get_current_benchmark_bar() {
+                // Get initial benchmark price from first bar in timeline
+                let initial_benchmark_price = if let Some(first_bar) = self.datafeed.get_initial_benchmark_bar() {
+                    first_bar.close
+                } else {
+                    benchmark_bar.close
+                };
+                // Benchmark equity = initial_cash * (current_price / initial_price)
+                let benchmark_equity = self.config.cash * (benchmark_bar.close / initial_benchmark_price);
+                self.metrics.record_benchmark(datetime, benchmark_equity);
+            }
         }
     }
 
@@ -379,6 +392,24 @@ impl PyBacktestEngine {
             dict.set_item("profit_loss_ratio", stats.profit_loss_ratio)?;
             dict.set_item("open_count", stats.open_count)?;
             dict.set_item("close_count", stats.close_count)?;
+            
+            // Benchmark statistics
+            if let Some(benchmark_return) = stats.benchmark_return {
+                dict.set_item("benchmark_return", benchmark_return)?;
+            }
+            if let Some(benchmark_annualized_return) = stats.benchmark_annualized_return {
+                dict.set_item("benchmark_annualized_return", benchmark_annualized_return)?;
+            }
+            if let Some(benchmark_max_drawdown) = stats.benchmark_max_drawdown {
+                dict.set_item("benchmark_max_drawdown", benchmark_max_drawdown)?;
+            }
+            if let Some(start) = stats.benchmark_max_drawdown_start {
+                dict.set_item("benchmark_max_drawdown_start", start.to_rfc3339())?;
+            }
+            if let Some(end) = stats.benchmark_max_drawdown_end {
+                dict.set_item("benchmark_max_drawdown_end", end.to_rfc3339())?;
+            }
+            
             Ok(dict.into())
         })
     }

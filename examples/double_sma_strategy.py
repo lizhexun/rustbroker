@@ -6,7 +6,7 @@
 import os
 import sys
 from pathlib import Path
-
+from datetime import datetime
 # 添加项目路径到 sys.path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root / "python"))
@@ -89,25 +89,18 @@ class DoubleMAStrategy(Strategy):
     
     def on_trade(self, fill, ctx):
         """订单成交回调"""
-        from datetime import datetime
+        # side_str = "买入" if fill['side'] == 'buy' else "卖出"
+        # quantity_shares = fill.get('filled_quantity', 0) * 100  # 转换为股数
         
-        side_str = "买入" if fill['side'] == 'buy' else "卖出"
-        quantity_shares = fill.get('filled_quantity', 0) * 100  # 转换为股数
-        
-        # 格式化时间
-        timestamp_str = fill.get('timestamp', '')
-        if timestamp_str:
-            try:
-                # 解析 RFC3339 格式的时间字符串
-                dt = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
-                # 转换为本地时间格式（去掉时区信息）
-                time_str = dt.strftime('%Y-%m-%d %H:%M:%S')
-            except:
-                time_str = timestamp_str
-        else:
-            time_str = "未知时间"
-        
-        print(f"{time_str} 成交: {side_str} {fill['symbol']} {quantity_shares:.0f}股 @ {fill.get('price', 0):.4f}元 (手续费: {fill.get('commission', 0):.2f}元)")
+        # # 格式化时间
+        # timestamp_str = fill.get('timestamp', '')
+     
+        # # 解析 RFC3339 格式的时间字符串
+        # dt = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+        # # 转换为本地时间格式（去掉时区信息）
+        # time_str = dt.strftime('%Y-%m-%d %H:%M:%S')
+       
+        # print(f"{time_str} 成交: {side_str} {fill['symbol']} {quantity_shares:.0f}股 @ {fill.get('price', 0):.4f}元 (手续费: {fill.get('commission', 0):.2f}元)")
     
     def on_stop(self, ctx):
         """回测结束回调"""
@@ -179,20 +172,49 @@ def main():
     max_dd_start = stats.get('max_drawdown_start')
     max_dd_end = stats.get('max_drawdown_end')
     if max_dd_start and max_dd_end:
-        # 格式化时间字符串
-        from datetime import datetime
         try:
             start_dt = datetime.fromisoformat(max_dd_start.replace('Z', '+00:00'))
             end_dt = datetime.fromisoformat(max_dd_end.replace('Z', '+00:00'))
             print(f"最大回撤时间段: {start_dt.strftime('%Y-%m-%d %H:%M:%S')} 至 {end_dt.strftime('%Y-%m-%d %H:%M:%S')}")
         except:
             print(f"最大回撤时间段: {max_dd_start} 至 {max_dd_end}")
-    
+
     print(f"夏普比率: {stats.get('sharpe_ratio', 0):.4f}")
     print(f"胜率: {stats.get('win_rate', 0):.2%}")
     print(f"盈亏比: {stats.get('profit_loss_ratio', 0):.4f}")
     print(f"开仓次数: {stats.get('open_count', 0)}")
     print(f"平仓次数: {stats.get('close_count', 0)}")
+    
+    # 打印基准信息（从引擎返回的统计中获取）
+    print("\n=== 基准信息 ===")
+    benchmark_return = stats.get('benchmark_return')
+    benchmark_annualized_return = stats.get('benchmark_annualized_return')
+    benchmark_max_dd = stats.get('benchmark_max_drawdown')
+    benchmark_max_dd_start = stats.get('benchmark_max_drawdown_start')
+    benchmark_max_dd_end = stats.get('benchmark_max_drawdown_end')
+    
+    if benchmark_return is not None:
+        print(f"基准总收益: {benchmark_return:.2%}")
+    if benchmark_annualized_return is not None:
+        print(f"基准年化收益: {benchmark_annualized_return:.2%}")
+    if benchmark_max_dd is not None:
+        print(f"基准最大回撤: {benchmark_max_dd:.4f}")
+    if benchmark_max_dd_start and benchmark_max_dd_end:
+        try:
+            start_dt = datetime.fromisoformat(benchmark_max_dd_start.replace('Z', '+00:00'))
+            end_dt = datetime.fromisoformat(benchmark_max_dd_end.replace('Z', '+00:00'))
+            print(f"基准最大回撤时间段: {start_dt.strftime('%Y-%m-%d %H:%M:%S')} 至 {end_dt.strftime('%Y-%m-%d %H:%M:%S')}")
+        except:
+            print(f"基准最大回撤时间段: {benchmark_max_dd_start} 至 {benchmark_max_dd_end}")
+    
+    # 如果基准信息存在，显示对比
+    if benchmark_return is not None:
+        print("\n=== 策略 vs 基准 ===")
+        strategy_return = stats.get('total_return', 0)
+        excess_return = strategy_return - benchmark_return
+        print(f"超额收益: {excess_return:.2%}")
+        if benchmark_return != 0:
+            print(f"策略/基准收益比: {strategy_return / benchmark_return:.4f}")
 
 
 if __name__ == "__main__":
