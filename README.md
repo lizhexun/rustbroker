@@ -2,12 +2,12 @@
 
 基于 Rust 核心引擎的高性能 Python 回测框架
 
-## 特�?
+## 特性
 
 - 🚀 **高性能**：Rust 核心引擎处理性能关键路径，Python 层仅负责策略逻辑
-- 📊 **易用�?*：简洁直观的 API 设计，策略作者只需关注交易逻辑
-- 🔧 **功能丰富**：支持多资产回测、指标计算、订单管理、风险控�?
-- 🎯 **A股优�?*：内�?T+1/T+0 规则、手续费计算、印花税�?A 股特�?
+- 📊 **易用性**：简洁直观的 API 设计，策略作者只需关注交易逻辑
+- 🔧 **功能丰富**：支持多资产回测、指标计算、订单管理、风险控制
+- 🎯 **A股优化**：内置T+1/T+0 规则、手续费计算、印花税等A股特性
 
 ## 安装
 
@@ -19,13 +19,13 @@
 
 ### 安装步骤
 
-1. **安装 Rust**（如果尚未安装）�?
+1. **安装 Rust**（如果尚未安装）：
 
    ```bash
    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
    ```
 
-2. **安装 maturin**�?
+2. **安装 maturin**：
 
    ```bash
    pip install maturin
@@ -33,25 +33,25 @@
 
    ```
 
-3. **构建 Rust 扩展**�?
+3. **构建 Rust 扩展**：
 
    ```bash
    cd rust/engine_rust
    maturin develop
-   # 或者使�?release 模式（更慢但更快）：
+   # 或者使用release 模式（更慢但更快）：
    maturin develop --release
 
    python -m maturin develop --release
    
    ```
 
-4. **安装 Python 依赖**（如果需要）�?
+4. **安装 Python 依赖**（如果需要）：
 
    ```bash
    pip install pandas numpy  # 用于数据处理
    ```
 
-## 快速开�?
+## 快速开始
 
 ### 1. 创建策略
 
@@ -67,16 +67,16 @@ from rustbroker.strategy import Strategy
 from rustbroker.indicators import Indicator
 
 class DoubleMAStrategy(Strategy):
-    """双均线策略示�?""
+    """双均线策略示例"""
     
     def on_start(self, ctx):
-        """初始化策�?""
+        """初始化策略"""
         ctx.state["last_signal"] = {}
     
     def on_bar(self, ctx):
         """每个bar的处理逻辑"""
         for symbol in ctx.symbols:
-            # 获取指标�?
+            # 获取指标值
             sma_short = ctx.get_indicator_value("sma_5_close", symbol)
             sma_long = ctx.get_indicator_value("sma_20_close", symbol)
             
@@ -88,17 +88,17 @@ class DoubleMAStrategy(Strategy):
             position = pos_info.get("position", 0.0)
             available = pos_info.get("available", 0.0)
             
-            # 双均线策略：金叉买入，死叉卖�?
+            # 双均线策略：金叉买入，死叉卖出
             if sma_short > sma_long and position == 0:
-                # 金叉：买�?
+                # 金叉：买入
                 ctx.order.buy(symbol=symbol, quantity=1.0, quantity_type="count")
             elif sma_short < sma_long and available > 0:
-                # 死叉：卖�?
+                # 死叉：卖出
                 ctx.order.sell(symbol=symbol, quantity=available, quantity_type="count")
     
     def on_stop(self, ctx):
         """回测结束"""
-        print(f"回测结束，最终净�? {ctx.equity:.2f}")
+        print(f"回测结束，最终净值 {ctx.equity:.2f}")
 ```
 
 ### 2. 准备数据
@@ -112,7 +112,7 @@ datetime,open,high,low,close,volume
 ...
 ```
 
-### 3. 配置并运行回�?
+### 3. 配置并运行回测
 
 ```python
 def main():
@@ -130,15 +130,15 @@ def main():
     # 创建回测引擎
     engine = BacktestEngine(cfg)
     
-    # 加载行情数据（需要根据实际的数据加载方式调整�?
-    # 这里假设�?load_csv_to_bars 函数来加载CSV数据
+    # 加载行情数据（需要根据实际的数据加载方式调整）
+    # 这里假设使用load_csv_to_bars 函数来加载CSV数据
     from rustbroker.data import load_csv_to_bars  # 如果存在
     
     symbol = "600000.SH"
     data_path = "data/sh600000_min.csv"
     bars = load_csv_to_bars(data_path, symbol=symbol)
     
-    # 或者手动准备数�?
+    # 或者手动准备数据
     # bars = [
     #     {
     #         "datetime": "2025-01-01 09:30:00",
@@ -164,9 +164,9 @@ def main():
     
     # 查看结果
     stats = result.get("stats", {})
-    print(f"总收�? {stats.get('total_return', 0):.2%}")
+    print(f"总收益 {stats.get('total_return', 0):.2%}")
     print(f"年化收益: {stats.get('annualized_return', 0):.2%}")
-    print(f"最大回�? {stats.get('max_drawdown', 0):.4f}")
+    print(f"最大回撤 {stats.get('max_drawdown', 0):.4f}")
     print(f"夏普比率: {stats.get('sharpe', 0):.4f}")
 
 if __name__ == "__main__":
@@ -175,16 +175,16 @@ if __name__ == "__main__":
 
 ### 4. 运行示例
 
-项目提供了多个示例，可以直接运行�?
+项目提供了多个示例，可以直接运行：
 
 ```bash
-# 双均线策略示�?
+# 双均线策略示例
 python examples/double_sma_strategy.py
 
 # 投资组合回测示例
 python examples/run_portfolio_backtest.py
 
-# 多资产回测示�?
+# 多资产回测示例
 python examples/run_multi_assets.py
 ```
 
@@ -192,7 +192,7 @@ python examples/run_multi_assets.py
 
 ### BacktestEngine
 
-回测引擎是核心组件，负责�?
+回测引擎是核心组件，负责：
 
 - 管理市场数据
 - 执行策略逻辑
@@ -210,14 +210,14 @@ python examples/run_multi_assets.py
 
 ### BarContext
 
-上下文对象，提供�?
+上下文对象，提供：
 
-- `ctx.datetime`: 当前bar的时�?
+- `ctx.datetime`: 当前bar的时间
 - `ctx.cash`: 可用现金
-- `ctx.equity`: 总资�?
+- `ctx.equity`: 总资产
 - `ctx.positions`: 持仓信息
 - `ctx.order`: 下单接口
-- `ctx.get_indicator_value(name, symbol)`: 获取指标�?
+- `ctx.get_indicator_value(name, symbol)`: 获取指标值
 - `ctx.get_bars(symbol, count)`: 获取历史bars
 
 ### OrderHelper
@@ -230,18 +230,18 @@ python examples/run_multi_assets.py
 
 ## 更多示例
 
-查看 `examples/` 目录了解更多示例�?
+查看 `examples/` 目录了解更多示例：
 
-- `double_sma_strategy.py`: 双均线策�?
+- `double_sma_strategy.py`: 双均线策略
 - `run_portfolio_backtest.py`: 投资组合回测
-- `run_multi_assets.py`: 多资产回�?
+- `run_multi_assets.py`: 多资产回测
 - `run_grid_search.py`: 参数网格搜索
 
 ## 文档
 
-- [技术设计文档](docs/TECHNICAL_DESIGN.md)
+- [技术设计文档](docs/technical_design.md)
 - [回测引擎核心文档](docs/backtest_engine_core.md)
 
-## 许可�?
+## 许可证
 
 MIT License
