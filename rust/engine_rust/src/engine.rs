@@ -10,6 +10,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use pyo3::wrap_pyfunction;
 use std::collections::HashMap;
+use std::cell::RefCell;
 
 /// Backtest configuration
 #[derive(Clone, Debug)]
@@ -45,7 +46,7 @@ impl Default for BacktestConfig {
 pub struct BacktestEngine {
     pub(crate) config: BacktestConfig,
     pub(crate) datafeed: DataFeed,
-    pub(crate) indicator_engine: IndicatorEngine,
+    pub(crate) indicator_engine: RefCell<IndicatorEngine>,
     pub(crate) execution_engine: ExecutionEngine,
     pub(crate) portfolio: PortfolioState,
     pub(crate) metrics: MetricsRecorder,
@@ -65,7 +66,7 @@ impl BacktestEngine {
         Self {
             config,
             datafeed: DataFeed::new(),
-            indicator_engine: IndicatorEngine::new(),
+            indicator_engine: RefCell::new(IndicatorEngine::new()),
             execution_engine,
             portfolio,
             metrics: MetricsRecorder::new(),
@@ -83,13 +84,13 @@ impl BacktestEngine {
     }
 
     /// Register indicator (called from Python)
-    pub fn register_indicator(&mut self, name: String, def: crate::indicator_engine::IndicatorDef) {
-        self.indicator_engine.register_indicator(name, def);
+    pub fn register_indicator(&self, name: String, def: crate::indicator_engine::IndicatorDef) {
+        self.indicator_engine.borrow_mut().register_indicator(name, def);
     }
 
     /// Compute all indicators
     pub fn compute_all_indicators(&mut self) {
-        self.indicator_engine.compute_all_indicators(&self.datafeed);
+        self.indicator_engine.borrow_mut().compute_all_indicators(&self.datafeed);
     }
 
     /// Reset to start of backtest (initialize indices)
@@ -97,15 +98,16 @@ impl BacktestEngine {
         // Reset datafeed to start of timeline
         self.datafeed.reset();
         // Reset indicator engine index
-        self.indicator_engine.update_index(0);
+        self.indicator_engine.borrow_mut().update_index(0);
     }
 
 
     /// Get indicator value
     pub fn get_indicator_value(&self, name: &str, symbol: &str, count: Option<usize>) -> Option<Vec<f64>> {
+        let engine = self.indicator_engine.borrow();
         match count {
-            Some(n) => self.indicator_engine.get_indicator_value_count(name, symbol, n),
-            None => self.indicator_engine.get_indicator_value(name, symbol).map(|v| vec![v]),
+            Some(n) => engine.get_indicator_value_count(name, symbol, n),
+            None => engine.get_indicator_value(name, symbol).map(|v| vec![v]),
         }
     }
 
@@ -165,7 +167,7 @@ impl BacktestEngine {
             .unwrap_or_else(|| chrono::Utc::now().date_naive());
         self.portfolio.update_t1_availability(current_date);
         self.datafeed.next();
-        self.indicator_engine.update_index(self.datafeed.current_index());
+        self.indicator_engine.borrow_mut().update_index(self.datafeed.current_index());
     }
 
     /// Check if has next bar
@@ -426,7 +428,7 @@ impl PyBacktestEngine {
         self.engine.get_equity_curve()
     }
 
-    fn register_indicator(&mut self, name: String, indicator_type: String, params: HashMap<String, String>, lookback_period: usize) -> PyResult<()> {
+    fn register_indicator(&self, name: String, indicator_type: String, params: HashMap<String, String>, lookback_period: usize) -> PyResult<()> {
         use crate::indicator_engine::IndicatorDef;
         let def = match indicator_type.as_str() {
             "rust_builtin" => IndicatorDef::RustBuiltin {
@@ -456,6 +458,135 @@ impl PyBacktestEngine {
     fn get_fills(&self) -> PyResult<Vec<PyFill>> {
         let fills = self.engine.get_fills();
         Ok(fills.iter().map(|f| PyFill::from(f.clone())).collect())
+    }
+
+    /// Run backtest with strategy callbacks
+    /// Main loop is executed in Rust for better performance
+    fn run_backtest(
+        this: &Bound<'_, Self>,
+        py: Python,
+        strategy: &Bound<'_, PyAny>,
+        create_context: &Bound<'_, PyAny>,
+        compute_indicators: bool,
+    ) -> PyResult<PyObject> {
+        // Call on_start - allow Python callbacks to access engine
+        {
+            let ctx = create_context.call0()?;
+            // Call strategy on_start - this may register indicators
+            strategy.call_method1("on_start", (ctx,))?;
+        }
+
+        // Now get mutable reference to mutate engine
+        let mut self_ref = this.borrow_mut();
+        
+        // Compute indicators if needed (after on_start to allow registration)
+        // Check if there are any registered indicators in the engine
+        let has_indicators = self_ref.engine.indicator_engine.borrow().has_indicators();
+        if has_indicators {
+            self_ref.engine.compute_all_indicators();
+        }
+
+        // Reset to start of backtest
+        self_ref.engine.reset();
+
+        // Main backtest loop
+        while self_ref.engine.has_next() {
+            // Execute orders first (needs mutable access)
+            let fills = self_ref.engine.execute_orders();
+            
+            // Then create context and call Python callbacks (releases mutable borrow)
+            {
+                // Drop mutable borrow before calling Python
+                drop(self_ref);
+                
+                let ctx = create_context.call0()?;
+                
+                // Call strategy.on_bar
+                strategy.call_method1("on_bar", (ctx.clone(),))?;
+                
+                // Call on_trade for each fill
+                for fill in &fills {
+                    let fill_dict: PyObject = {
+                        let dict = PyDict::new_bound(py);
+                        dict.set_item("symbol", &fill.symbol)?;
+                        dict.set_item("side", match fill.side {
+                            crate::types::OrderSide::Buy => "buy",
+                            crate::types::OrderSide::Sell => "sell",
+                        })?;
+                        dict.set_item("filled_quantity", fill.quantity)?;
+                        dict.set_item("price", fill.price)?;
+                        dict.set_item("commission", fill.commission)?;
+                        dict.set_item("timestamp", fill.timestamp.to_rfc3339())?;
+                        dict.into()
+                    };
+                    
+                    // Call strategy.on_trade
+                    strategy.call_method1("on_trade", (fill_dict, ctx.clone()))?;
+                }
+                
+                // Re-acquire mutable borrow after Python callbacks
+                self_ref = this.borrow_mut();
+            }
+            
+            // Record equity (needs mutable access)
+            self_ref.engine.record_equity();
+            
+            // Move to next bar (needs mutable access)
+            self_ref.engine.next();
+        }
+
+        // Call on_stop - release mutable borrow temporarily
+        drop(self_ref);
+        {
+            let ctx = create_context.call0()?;
+            strategy.call_method1("on_stop", (ctx,))?;
+        }
+
+        // Get and return results (use immutable borrow)
+        let self_immut = this.borrow();
+        let stats_result = self_immut.engine.get_stats();
+        let equity_curve = self_immut.engine.get_equity_curve();
+
+        // Build result dictionary
+        let result_dict = PyDict::new_bound(py);
+        let stats_dict = PyDict::new_bound(py);
+        
+        stats_dict.set_item("total_return", stats_result.total_return)?;
+        stats_dict.set_item("annualized_return", stats_result.annualized_return)?;
+        stats_dict.set_item("max_drawdown", stats_result.max_drawdown)?;
+        if let Some(start) = stats_result.max_drawdown_start {
+            stats_dict.set_item("max_drawdown_start", start.to_rfc3339())?;
+        }
+        if let Some(end) = stats_result.max_drawdown_end {
+            stats_dict.set_item("max_drawdown_end", end.to_rfc3339())?;
+        }
+        stats_dict.set_item("sharpe_ratio", stats_result.sharpe_ratio)?;
+        stats_dict.set_item("win_rate", stats_result.win_rate)?;
+        stats_dict.set_item("profit_loss_ratio", stats_result.profit_loss_ratio)?;
+        stats_dict.set_item("open_count", stats_result.open_count)?;
+        stats_dict.set_item("close_count", stats_result.close_count)?;
+        
+        // Benchmark statistics
+        if let Some(benchmark_return) = stats_result.benchmark_return {
+            stats_dict.set_item("benchmark_return", benchmark_return)?;
+        }
+        if let Some(benchmark_annualized_return) = stats_result.benchmark_annualized_return {
+            stats_dict.set_item("benchmark_annualized_return", benchmark_annualized_return)?;
+        }
+        if let Some(benchmark_max_drawdown) = stats_result.benchmark_max_drawdown {
+            stats_dict.set_item("benchmark_max_drawdown", benchmark_max_drawdown)?;
+        }
+        if let Some(start) = stats_result.benchmark_max_drawdown_start {
+            stats_dict.set_item("benchmark_max_drawdown_start", start.to_rfc3339())?;
+        }
+        if let Some(end) = stats_result.benchmark_max_drawdown_end {
+            stats_dict.set_item("benchmark_max_drawdown_end", end.to_rfc3339())?;
+        }
+        
+        result_dict.set_item("stats", stats_dict)?;
+        result_dict.set_item("equity_curve", equity_curve)?;
+        
+        Ok(result_dict.into())
     }
 }
 

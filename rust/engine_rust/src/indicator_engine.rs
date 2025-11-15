@@ -1,7 +1,6 @@
 // IndicatorEngine: Indicator registration and pre-computation
 
 use crate::datafeed::DataFeed;
-use crate::types::Bar;
 use std::collections::HashMap;
 use ta::indicators::SimpleMovingAverage;
 use ta::Next;
@@ -39,6 +38,11 @@ impl IndicatorEngine {
     /// Register an indicator
     pub fn register_indicator(&mut self, name: String, def: IndicatorDef) {
         self.indicators.insert(name.clone(), def);
+    }
+
+    /// Check if there are any registered indicators
+    pub fn has_indicators(&self) -> bool {
+        !self.indicators.is_empty()
     }
 
     /// Compute all indicators for all bars
@@ -153,8 +157,20 @@ impl IndicatorEngine {
 
     /// Get indicator value for current bar
     pub fn get_indicator_value(&self, name: &str, symbol: &str) -> Option<f64> {
-        self.get_indicator_value_count(name, symbol, 1)
-            .and_then(|v| v.first().copied())
+        let key = (name.to_string(), symbol.to_string());
+        let values = self.indicator_values.get(&key)?;
+
+        if self.current_index >= values.len() {
+            return None;
+        }
+
+        let val = values[self.current_index];
+        // Return None if NaN, otherwise return the value
+        if val.is_nan() {
+            None
+        } else {
+            Some(val)
+        }
     }
 
     /// Get indicator values for past N bars (including current)
@@ -173,16 +189,24 @@ impl IndicatorEngine {
             return None;
         }
 
-        let result: Vec<f64> = values[start_idx..end_idx.min(values.len())]
-            .iter()
-            .filter(|v| !v.is_nan())
-            .copied()
-            .collect();
-
-        if result.is_empty() {
-            None
+        let slice = &values[start_idx..end_idx.min(values.len())];
+        
+        // For single value (count=1), return the value even if NaN (caller can handle it)
+        // For multiple values, filter out NaN to return only valid values
+        if count == 1 {
+            Some(vec![slice[0]])
         } else {
-            Some(result)
+            let result: Vec<f64> = slice
+                .iter()
+                .filter(|v| !v.is_nan())
+                .copied()
+                .collect();
+
+            if result.is_empty() {
+                None
+            } else {
+                Some(result)
+            }
         }
     }
 

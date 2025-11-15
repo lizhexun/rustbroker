@@ -2,10 +2,10 @@
 Main API for backtest engine
 """
 
+import math
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 from engine_rust import PyBacktestConfig, PyBacktestEngine, PyBar
-
 
 class BacktestConfig:
     """Backtest configuration"""
@@ -94,82 +94,26 @@ class BacktestEngine:
             benchmark_name = list(benchmark.keys())[0]
             self.set_benchmark(benchmark_name, benchmark[benchmark_name])
         
-        # Call on_start
-        ctx = self._create_context()
-        strategy.on_start(ctx)
+        # Create context factory function - simplified, all logic in Rust
+        def create_context():
+            return BarContext(self._rust_engine, self._indicator_registry)
         
-        # Compute indicators (if any were registered)
-        # This must be called after on_start and before the main loop
-        if self._indicator_registry:
-            self._rust_engine.compute_all_indicators()
+        # Run backtest in Rust (main loop is executed in Rust for better performance)
+        result = self._rust_engine.run_backtest(
+            strategy,
+            create_context,
+            bool(self._indicator_registry)
+        )
         
-        # Reset to start of backtest (ensure indices are initialized)
-        self._rust_engine.reset()
-        
-        # Main backtest loop
-        while self._rust_engine.has_next():
-            ctx = self._create_context()
-            
-            # Call strategy
-            strategy.on_bar(ctx)
-            
-            # Execute orders
-            fills = self._rust_engine.execute_orders()
-            
-            # Call on_trade for each fill
-            for fill in fills:
-                fill_dict = {
-                    'side': fill.side,
-                    'symbol': fill.symbol,
-                    'filled_quantity': fill.quantity,
-                    'price': fill.price,
-                    'commission': fill.commission,
-                    'timestamp': fill.timestamp,
-                }
-                strategy.on_trade(fill_dict, ctx)
-            
-            # Record equity
-            self._rust_engine.record_equity()
-            
-            # Move to next bar
-            self._rust_engine.next()
-        
-        # Call on_stop
-        ctx = self._create_context()
-        strategy.on_stop(ctx)
-        
-        # Return results
-        stats_result = self._rust_engine.get_stats()
-        equity_curve = self._rust_engine.get_equity_curve()
-        
-        # Convert stats PyObject to dict (it should already be a dict from Rust)
-        stats_dict = {}
-        try:
-            # Try to convert PyObject to dict
-            if hasattr(stats_result, 'get'):
-                stats_dict = dict(stats_result)
-            else:
-                # Fallback: access as attributes
-                stats_dict = {
-                    'total_return': getattr(stats_result, 'total_return', 0.0),
-                    'annualized_return': getattr(stats_result, 'annualized_return', 0.0),
-                    'max_drawdown': getattr(stats_result, 'max_drawdown', 0.0),
-                    'sharpe_ratio': getattr(stats_result, 'sharpe_ratio', 0.0),
-                    'win_rate': getattr(stats_result, 'win_rate', 0.0),
-                    'profit_loss_ratio': getattr(stats_result, 'profit_loss_ratio', 0.0),
-                }
-        except Exception:
-            # If conversion fails, use empty dict
-            stats_dict = {}
-        
-        return {
-            "stats": stats_dict,
-            "equity_curve": equity_curve,
-        }
+        # Convert result dict to Python dict
+        # result is already a dict from Rust, but convert to ensure compatibility
+        if isinstance(result, dict):
+            return result
+        return dict(result)
     
     def _create_context(self):
         """Create BarContext for strategy"""
-        return BarContext(self, self._indicator_registry)
+        return BarContext(self._rust_engine, self._indicator_registry)
     
     def _dict_to_bar(self, bar_dict: Dict[str, Any]) -> PyBar:
         """Convert dict to PyBar"""
@@ -220,107 +164,82 @@ class BacktestEngine:
 
 
 class BarContext:
-    """Context object passed to strategy"""
+    """Context object passed to strategy - simplified, logic in Rust"""
     
-    def __init__(self, engine: BacktestEngine, indicator_registry: Dict):
-        self._backtest_engine = engine
+    def __init__(self, rust_engine, indicator_registry: Dict):
+        self._rust_engine = rust_engine
         self._indicator_registry = indicator_registry
-        self._current_bars = None
-        self._positions = None
-        self._cash = None
-        self._equity = None
     
     @property
     def datetime(self) -> str:
-        """Current bar datetime"""
-        return self._backtest_engine._rust_engine.get_current_datetime() or ""
+        return self._rust_engine.get_current_datetime() or ""
     
     @property
     def symbols(self) -> List[str]:
-        """List of all symbols"""
-        return self._backtest_engine._rust_engine.get_symbols()
+        return self._rust_engine.get_symbols()
     
     @property
     def cash(self) -> float:
-        """Available cash"""
-        if self._cash is None:
-            self._cash = self._backtest_engine._rust_engine.get_cash()
-        return self._cash
+        return self._rust_engine.get_cash()
     
     @property
     def equity(self) -> float:
-        """Total equity"""
-        if self._equity is None:
-            self._equity = self._backtest_engine._rust_engine.get_equity()
-        return self._equity
+        return self._rust_engine.get_equity()
     
     @property
     def positions(self) -> Dict[str, Dict[str, float]]:
-        """Current positions"""
-        if self._positions is None:
-            self._positions = self._backtest_engine._rust_engine.get_positions()
-        return self._positions
+        return self._rust_engine.get_positions()
     
     def get_bars(self, symbol: str, count: int = 1) -> List[Dict[str, Any]]:
         """Get historical bars for a symbol"""
-        py_bars = self._backtest_engine._rust_engine.get_bars(symbol, count)
-        return [self._bar_to_dict(bar) for bar in py_bars]
-    
-    def get_indicator_value(self, name: str, symbol: str, count: Optional[int] = None) -> Optional[Any]:
-        """Get indicator value"""
-        values = self._backtest_engine._rust_engine.get_indicator_value(name, symbol, count)
-        if values is None:
-            return None
-        if count is None or count == 1:
-            return round(values[0], 4) if values else None
-        return [round(v, 4) for v in values]
-    
-    def register_indicator(self, name: str, indicator_def, count: Optional[int] = None):
-        """Register an indicator (called in on_start)"""
-        # Store in Python registry for reference
-        self._indicator_registry[name] = {
-            "def": indicator_def,
-            "lookback": count or 1,
-        }
-        
-        # Also register in Rust engine
-        if isinstance(indicator_def, dict):
-            indicator_type = indicator_def.get("type", "rust_builtin")
-            params = indicator_def.get("params", {})
-            lookback_period = count or indicator_def.get("lookback_period", 1)
-            
-            # Convert params to string dict for Rust
-            params_str = {k: str(v) for k, v in params.items()}
-            # Add indicator name to params if present
-            if "name" in indicator_def:
-                params_str["name"] = indicator_def["name"]
-            
-            self._backtest_engine._rust_engine.register_indicator(
-                name,
-                indicator_type,
-                params_str,
-                lookback_period
-            )
-    
-    def is_tradable(self, symbol: str) -> bool:
-        """Check if symbol is tradable at current time"""
-        return symbol in self.symbols
-    
-    @property
-    def order(self):
-        """Order helper for placing orders"""
-        return OrderHelper(self._backtest_engine._rust_engine)
-    
-    def _bar_to_dict(self, bar: PyBar) -> Dict[str, Any]:
-        """Convert PyBar to dict"""
-        return {
+        py_bars = self._rust_engine.get_bars(symbol, count)
+        return [{
             "datetime": bar.datetime,
             "open": bar.open,
             "high": bar.high,
             "low": bar.low,
             "close": bar.close,
             "volume": bar.volume,
-        }
+        } for bar in py_bars]
+    
+    def get_indicator_value(self, name: str, symbol: str, count: Optional[int] = None) -> Optional[Any]:
+        """Get indicator value"""
+        values = self._rust_engine.get_indicator_value(name, symbol, count)
+        if values is None:
+            return None
+        if count is None or count == 1:
+            if not values:
+                return None
+            val = values[0]
+            # Return None if value is NaN, otherwise round to 4 decimal places
+            if math.isnan(val):
+                return None
+            return round(val, 4)
+        # For multiple values, filter out NaN and round
+        result = [round(v, 4) for v in values if not math.isnan(v)]
+        return result if result else None
+    
+    def register_indicator(self, name: str, indicator_def, count: Optional[int] = None):
+        """Register an indicator (called in on_start)"""
+        self._indicator_registry[name] = {"def": indicator_def, "lookback": count or 1}
+        
+        if isinstance(indicator_def, dict):
+            indicator_type = indicator_def.get("type", "rust_builtin")
+            params = indicator_def.get("params", {})
+            lookback_period = count or indicator_def.get("lookback_period", 1)
+            params_str = {k: str(v) for k, v in params.items()}
+            if "name" in indicator_def:
+                params_str["name"] = indicator_def["name"]
+            # Debug: uncomment to see indicator registration
+            # print(f"Registering indicator: {name}, type: {indicator_type}, params: {params_str}, lookback: {lookback_period}")
+            self._rust_engine.register_indicator(name, indicator_type, params_str, lookback_period)
+    
+    def is_tradable(self, symbol: str) -> bool:
+        return symbol in self.symbols
+    
+    @property
+    def order(self):
+        return OrderHelper(self._rust_engine)
 
 
 class OrderHelper:
