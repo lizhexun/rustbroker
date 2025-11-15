@@ -18,6 +18,8 @@ pub struct DataFeed {
     current_index: usize,
     // Cache: symbol -> current bar index in that symbol's data
     symbol_indices: HashMap<String, usize>,
+    // Cache: current bars to avoid repeated computation
+    cached_current_bars: Option<(usize, HashMap<String, Bar>)>,
 }
 
 impl DataFeed {
@@ -28,6 +30,7 @@ impl DataFeed {
             market_data: HashMap::new(),
             current_index: 0,
             symbol_indices: HashMap::new(),
+            cached_current_bars: None,
         }
     }
 
@@ -101,14 +104,30 @@ impl DataFeed {
         }
     }
 
-    /// Get current bars for all symbols
+    /// Get current bars for all symbols (with caching)
     pub fn get_current_bars(&self) -> HashMap<String, Bar> {
         if self.current_index >= self.benchmark_timeline.len() {
             return HashMap::new();
         }
 
-        let mut result = HashMap::new();
+        // Check cache first
+        if let Some((cached_idx, cached_bars)) = &self.cached_current_bars {
+            if *cached_idx == self.current_index {
+                return cached_bars.clone();
+            }
+        }
 
+        // Cache miss: compute current bars (should rarely happen if next() is called properly)
+        self._compute_current_bars()
+    }
+    
+    /// Internal method to compute current bars (used for caching)
+    fn _compute_current_bars(&self) -> HashMap<String, Bar> {
+        if self.current_index >= self.benchmark_timeline.len() {
+            return HashMap::new();
+        }
+
+        let mut result = HashMap::new();
         for (symbol, bars) in &self.market_data {
             if let Some(&idx) = self.symbol_indices.get(symbol) {
                 if idx < bars.len() {
@@ -116,7 +135,6 @@ impl DataFeed {
                 }
             }
         }
-
         result
     }
 
@@ -186,11 +204,14 @@ impl DataFeed {
     pub fn next(&mut self) {
         if self.current_index < self.benchmark_timeline.len() {
             self.current_index += 1;
+            
             // Update symbol indices for the new time point
             // Since time only moves forward, we can optimize by only advancing indices
             let current_time = if self.current_index < self.benchmark_timeline.len() {
                 self.benchmark_timeline[self.current_index]
             } else {
+                // At end, clear cache
+                self.cached_current_bars = None;
                 return;
             };
             
@@ -213,6 +234,10 @@ impl DataFeed {
                     }
                 }
             }
+            
+            // Update cache for new index
+            let current_bars = self._compute_current_bars();
+            self.cached_current_bars = Some((self.current_index, current_bars));
         }
     }
 
@@ -246,6 +271,9 @@ impl DataFeed {
         self.current_index = 0;
         // Re-initialize symbol indices
         self._update_all_symbol_indices();
+        // Initialize cache for index 0
+        let current_bars = self._compute_current_bars();
+        self.cached_current_bars = Some((0, current_bars));
     }
 }
 

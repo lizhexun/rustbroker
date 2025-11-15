@@ -45,29 +45,52 @@ impl ExecutionEngine {
     ) -> Vec<Fill> {
         let mut fills = Vec::new();
 
-        // Sort orders: sell first, then buy
-        self.orders.sort_by(|a, b| {
-            match (&a.side, &b.side) {
-                (OrderSide::Sell, OrderSide::Buy) => std::cmp::Ordering::Less,
-                (OrderSide::Buy, OrderSide::Sell) => std::cmp::Ordering::Greater,
-                _ => std::cmp::Ordering::Equal,
-            }
-        });
-
-        // Execute sell orders first
-        for order in &self.orders.clone() {
-            if order.side == OrderSide::Sell {
+        // Optimized: For small number of orders, use partition instead of sort
+        // This avoids cloning and unnecessary sorting overhead
+        if self.orders.len() < 10 {
+            // Direct separation: more efficient for small order counts
+            let (sell_orders, buy_orders): (Vec<_>, Vec<_>) = self.orders
+                .iter()
+                .partition(|o| matches!(o.side, OrderSide::Sell));
+            
+            // Execute sell orders first
+            for order in sell_orders {
                 if let Some(fill) = self.execute_order(order, current_bars, portfolio) {
                     fills.push(fill);
                 }
             }
-        }
-
-        // Execute buy orders
-        for order in &self.orders.clone() {
-            if order.side == OrderSide::Buy {
+            
+            // Execute buy orders
+            for order in buy_orders {
                 if let Some(fill) = self.execute_order(order, current_bars, portfolio) {
                     fills.push(fill);
+                }
+            }
+        } else {
+            // For larger order counts, use sort (more efficient for many orders)
+            self.orders.sort_by(|a, b| {
+                match (&a.side, &b.side) {
+                    (OrderSide::Sell, OrderSide::Buy) => std::cmp::Ordering::Less,
+                    (OrderSide::Buy, OrderSide::Sell) => std::cmp::Ordering::Greater,
+                    _ => std::cmp::Ordering::Equal,
+                }
+            });
+
+            // Execute sell orders first
+            for order in &self.orders {
+                if order.side == OrderSide::Sell {
+                    if let Some(fill) = self.execute_order(order, current_bars, portfolio) {
+                        fills.push(fill);
+                    }
+                }
+            }
+
+            // Execute buy orders
+            for order in &self.orders {
+                if order.side == OrderSide::Buy {
+                    if let Some(fill) = self.execute_order(order, current_bars, portfolio) {
+                        fills.push(fill);
+                    }
                 }
             }
         }

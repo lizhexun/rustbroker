@@ -94,9 +94,14 @@ class BacktestEngine:
             benchmark_name = list(benchmark.keys())[0]
             self.set_benchmark(benchmark_name, benchmark[benchmark_name])
         
-        # Create context factory function - simplified, all logic in Rust
+        # Create reusable context object (optimization: reuse instead of creating new each time)
+        _reusable_context = BarContext(self._rust_engine, self._indicator_registry)
+        
+        # Create context factory function that returns the reusable context
+        # and invalidates cache to ensure fresh data for each bar
         def create_context():
-            return BarContext(self._rust_engine, self._indicator_registry)
+            _reusable_context._invalidate_cache()  # Invalidate cache for new bar
+            return _reusable_context
         
         # Run backtest in Rust (main loop is executed in Rust for better performance)
         result = self._rust_engine.run_backtest(
@@ -164,31 +169,62 @@ class BacktestEngine:
 
 
 class BarContext:
-    """Context object passed to strategy - simplified, logic in Rust"""
+    """Context object passed to strategy - simplified, logic in Rust
+    
+    Performance optimization: Cache frequently accessed properties to reduce
+    Python-Rust boundary calls. Cache is invalidated when moving to next bar.
+    """
     
     def __init__(self, rust_engine, indicator_registry: Dict):
         self._rust_engine = rust_engine
         self._indicator_registry = indicator_registry
+        # Cache for frequently accessed properties
+        self._cached_cash = None
+        self._cached_equity = None
+        self._cached_positions = None
+        self._cached_datetime = None
+        self._cached_symbols = None
+        self._cache_valid = False
+    
+    def _ensure_cache(self):
+        """Ensure cache is up to date - called before accessing cached properties"""
+        if not self._cache_valid:
+            # Batch fetch all properties in one go (reduces Python-Rust calls)
+            self._cached_cash = self._rust_engine.get_cash()
+            self._cached_equity = self._rust_engine.get_equity()
+            self._cached_positions = self._rust_engine.get_positions()
+            self._cached_datetime = self._rust_engine.get_current_datetime() or ""
+            self._cached_symbols = self._rust_engine.get_symbols()
+            self._cache_valid = True
+    
+    def _invalidate_cache(self):
+        """Invalidate cache - called when moving to next bar"""
+        self._cache_valid = False
     
     @property
     def datetime(self) -> str:
-        return self._rust_engine.get_current_datetime() or ""
+        self._ensure_cache()
+        return self._cached_datetime
     
     @property
     def symbols(self) -> List[str]:
-        return self._rust_engine.get_symbols()
+        self._ensure_cache()
+        return self._cached_symbols
     
     @property
     def cash(self) -> float:
-        return self._rust_engine.get_cash()
+        self._ensure_cache()
+        return self._cached_cash
     
     @property
     def equity(self) -> float:
-        return self._rust_engine.get_equity()
+        self._ensure_cache()
+        return self._cached_equity
     
     @property
     def positions(self) -> Dict[str, Dict[str, float]]:
-        return self._rust_engine.get_positions()
+        self._ensure_cache()
+        return self._cached_positions
     
     def get_bars(self, symbol: str, count: int = 1) -> List[Dict[str, Any]]:
         """Get historical bars for a symbol"""
@@ -218,6 +254,63 @@ class BarContext:
         # For multiple values, filter out NaN and round
         result = [round(v, 4) for v in values if not math.isnan(v)]
         return result if result else None
+    
+    def get_indicator_values(self, symbol: str, names: List[str]) -> Dict[str, Optional[float]]:
+        """Get multiple indicator values in a single call (performance optimization)
+        
+        Args:
+            symbol: Symbol to get indicators for
+            names: List of indicator names
+            
+        Returns:
+            Dictionary mapping indicator names to their values (or None if not available)
+        """
+        result = self._rust_engine.get_indicator_values(symbol, names)
+        # Process and round values
+        processed = {}
+        for name, val_opt in result.items():
+            if val_opt is None:
+                processed[name] = None
+            else:
+                val = val_opt
+                if math.isnan(val):
+                    processed[name] = None
+                else:
+                    processed[name] = round(val, 4)
+        return processed
+    
+    def get_symbol_data(self, symbol: str, indicators: Optional[List[str]] = None, bars: int = 0) -> Dict[str, Any]:
+        """Get all data for a symbol in a single call (performance optimization)
+        
+        Args:
+            symbol: Symbol to get data for
+            indicators: List of indicator names to get (optional)
+            bars: Number of bars to get (0 = don't get bars)
+            
+        Returns:
+            Dictionary containing:
+            - indicators: Dict of indicator values
+            - bars: List of bar dictionaries (if bars > 0)
+            - position: Position info dict (if symbol has position)
+        """
+        result = {}
+        
+        # Batch get indicators
+        if indicators:
+            result["indicators"] = self.get_indicator_values(symbol, indicators)
+        
+        # Get bars if requested
+        if bars > 0:
+            result["bars"] = self.get_bars(symbol, bars)
+        
+        # Get position info (from cached positions)
+        self._ensure_cache()
+        if symbol in self._cached_positions:
+            result["position"] = self._cached_positions[symbol]
+        else:
+            result["position"] = {}
+        
+        return result
     
     def register_indicator(self, name: str, indicator_def, count: Optional[int] = None):
         """Register an indicator (called in on_start)"""

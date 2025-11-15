@@ -50,6 +50,8 @@ pub struct BacktestEngine {
     pub(crate) execution_engine: ExecutionEngine,
     pub(crate) portfolio: PortfolioState,
     pub(crate) metrics: MetricsRecorder,
+    // Cache: current prices to avoid repeated computation
+    cached_current_prices: Option<(usize, HashMap<String, f64>)>,
 }
 
 impl BacktestEngine {
@@ -70,6 +72,7 @@ impl BacktestEngine {
             execution_engine,
             portfolio,
             metrics: MetricsRecorder::new(),
+            cached_current_prices: None,
         }
     }
 
@@ -90,7 +93,11 @@ impl BacktestEngine {
 
     /// Compute all indicators
     pub fn compute_all_indicators(&mut self) {
+        use std::time::Instant;
+        let start_time = Instant::now();
         self.indicator_engine.borrow_mut().compute_all_indicators(&self.datafeed);
+        let elapsed = start_time.elapsed();
+        println!("[性能统计] 指标计算总耗时: {:.3}秒", elapsed.as_secs_f64());
     }
 
     /// Reset to start of backtest (initialize indices)
@@ -99,6 +106,8 @@ impl BacktestEngine {
         self.datafeed.reset();
         // Reset indicator engine index
         self.indicator_engine.borrow_mut().update_index(0);
+        // Clear price cache
+        self.cached_current_prices = None;
     }
 
 
@@ -109,6 +118,12 @@ impl BacktestEngine {
             Some(n) => engine.get_indicator_value_count(name, symbol, n),
             None => engine.get_indicator_value(name, symbol).map(|v| vec![v]),
         }
+    }
+
+    /// Get multiple indicator values for a symbol (batch operation)
+    pub fn get_indicator_values(&self, symbol: &str, names: &[&str]) -> std::collections::HashMap<String, Option<f64>> {
+        let engine = self.indicator_engine.borrow();
+        engine.get_indicator_values(symbol, names)
     }
 
     /// Get bars for a symbol
@@ -136,12 +151,38 @@ impl BacktestEngine {
 
     /// Record equity
     pub fn record_equity(&mut self) {
+        use std::time::Instant;
+        let start_time = Instant::now();
+        
         if let Some(datetime) = self.datafeed.get_current_datetime() {
-            let current_bars = self.datafeed.get_current_bars();
-            let current_prices: HashMap<String, f64> = current_bars
-                .iter()
-                .map(|(s, b)| (s.clone(), b.close))
-                .collect();
+            let current_index = self.datafeed.current_index();
+            
+            // Check cache for current prices
+            let current_prices = if let Some((cached_idx, cached_prices)) = &self.cached_current_prices {
+                if *cached_idx == current_index {
+                    cached_prices.clone()
+                } else {
+                    // Cache miss: compute prices
+                    let current_bars = self.datafeed.get_current_bars();
+                    let prices: HashMap<String, f64> = current_bars
+                        .iter()
+                        .map(|(s, b)| (s.clone(), b.close))
+                        .collect();
+                    // Update cache
+                    self.cached_current_prices = Some((current_index, prices.clone()));
+                    prices
+                }
+            } else {
+                // No cache: compute and cache
+                let current_bars = self.datafeed.get_current_bars();
+                let prices: HashMap<String, f64> = current_bars
+                    .iter()
+                    .map(|(s, b)| (s.clone(), b.close))
+                    .collect();
+                self.cached_current_prices = Some((current_index, prices.clone()));
+                prices
+            };
+            
             let equity = self.portfolio.calculate_equity(&current_prices);
             self.metrics.record_equity(datetime, equity);
             
@@ -157,6 +198,12 @@ impl BacktestEngine {
                 let benchmark_equity = self.config.cash * (benchmark_bar.close / initial_benchmark_price);
                 self.metrics.record_benchmark(datetime, benchmark_equity);
             }
+            
+            // Track equity recording time (only print periodically to avoid spam)
+            let elapsed = start_time.elapsed();
+            if current_index % 1000 == 0 && elapsed.as_millis() > 1 {
+                println!("[性能统计] Equity记录耗时: {:.3}毫秒 (bar #{})", elapsed.as_secs_f64() * 1000.0, current_index);
+            }
         }
     }
 
@@ -167,7 +214,14 @@ impl BacktestEngine {
             .unwrap_or_else(|| chrono::Utc::now().date_naive());
         self.portfolio.update_t1_availability(current_date);
         self.datafeed.next();
-        self.indicator_engine.borrow_mut().update_index(self.datafeed.current_index());
+        // Invalidate price cache when moving to next bar (will be recomputed on next record_equity)
+        let new_index = self.datafeed.current_index();
+        if let Some((cached_idx, _)) = &self.cached_current_prices {
+            if *cached_idx != new_index {
+                self.cached_current_prices = None;
+            }
+        }
+        self.indicator_engine.borrow_mut().update_index(new_index);
     }
 
     /// Check if has next bar
@@ -299,6 +353,12 @@ impl PyBacktestEngine {
 
     fn get_indicator_value(&self, name: String, symbol: String, count: Option<usize>) -> PyResult<Option<Vec<f64>>> {
         Ok(self.engine.get_indicator_value(&name, &symbol, count))
+    }
+
+    fn get_indicator_values(&self, symbol: String, names: Vec<String>) -> PyResult<HashMap<String, Option<f64>>> {
+        let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+        let result = self.engine.get_indicator_values(&symbol, &name_refs);
+        Ok(result)
     }
 
     fn get_bars(&self, symbol: String, count: usize) -> PyResult<Vec<PyBar>> {
@@ -469,6 +529,9 @@ impl PyBacktestEngine {
         create_context: &Bound<'_, PyAny>,
         compute_indicators: bool,
     ) -> PyResult<PyObject> {
+        use std::time::Instant;
+        let total_start_time = Instant::now();
+        
         // Call on_start - allow Python callbacks to access engine
         {
             let ctx = create_context.call0()?;
@@ -490,16 +553,31 @@ impl PyBacktestEngine {
         self_ref.engine.reset();
 
         // Main backtest loop
+        let loop_start_time = Instant::now();
+        let mut bar_count = 0;
+        let mut python_callback_time = std::time::Duration::ZERO;
+        let mut order_execution_time = std::time::Duration::ZERO;
+        let mut equity_recording_time = std::time::Duration::ZERO;
+        
         while self_ref.engine.has_next() {
+            bar_count += 1;
+            
             // Execute orders first (needs mutable access)
+            let order_start = Instant::now();
             let fills = self_ref.engine.execute_orders();
+            order_execution_time += order_start.elapsed();
             
             // Then create context and call Python callbacks (releases mutable borrow)
             {
                 // Drop mutable borrow before calling Python
                 drop(self_ref);
                 
+                let python_start = Instant::now();
                 let ctx = create_context.call0()?;
+                
+                // Invalidate cache before calling on_bar (ensures fresh data)
+                // Note: This is a no-op if cache invalidation is not implemented
+                // The cache will be populated on first property access
                 
                 // Call strategy.on_bar
                 strategy.call_method1("on_bar", (ctx.clone(),))?;
@@ -523,17 +601,37 @@ impl PyBacktestEngine {
                     // Call strategy.on_trade
                     strategy.call_method1("on_trade", (fill_dict, ctx.clone()))?;
                 }
+                python_callback_time += python_start.elapsed();
                 
                 // Re-acquire mutable borrow after Python callbacks
                 self_ref = this.borrow_mut();
             }
             
             // Record equity (needs mutable access)
+            let equity_start = Instant::now();
             self_ref.engine.record_equity();
+            equity_recording_time += equity_start.elapsed();
             
             // Move to next bar (needs mutable access)
             self_ref.engine.next();
         }
+        
+        // Print loop statistics
+        let loop_elapsed = loop_start_time.elapsed();
+        println!("\n[性能统计] ========== 回测主循环统计 ==========");
+        println!("[性能统计] 总bar数: {}", bar_count);
+        println!("[性能统计] 主循环总耗时: {:.3}秒", loop_elapsed.as_secs_f64());
+        println!("[性能统计] 平均每根bar耗时: {:.3}毫秒", loop_elapsed.as_secs_f64() * 1000.0 / bar_count.max(1) as f64);
+        println!("[性能统计] Python回调总耗时: {:.3}秒 ({:.1}%)", 
+                 python_callback_time.as_secs_f64(),
+                 if loop_elapsed.as_secs_f64() > 0.0 { python_callback_time.as_secs_f64() / loop_elapsed.as_secs_f64() * 100.0 } else { 0.0 });
+        println!("[性能统计] 订单执行总耗时: {:.3}秒 ({:.1}%)", 
+                 order_execution_time.as_secs_f64(),
+                 if loop_elapsed.as_secs_f64() > 0.0 { order_execution_time.as_secs_f64() / loop_elapsed.as_secs_f64() * 100.0 } else { 0.0 });
+        println!("[性能统计] Equity记录总耗时: {:.3}秒 ({:.1}%)", 
+                 equity_recording_time.as_secs_f64(),
+                 if loop_elapsed.as_secs_f64() > 0.0 { equity_recording_time.as_secs_f64() / loop_elapsed.as_secs_f64() * 100.0 } else { 0.0 });
+        println!("[性能统计] ======================================\n");
 
         // Call on_stop - release mutable borrow temporarily
         drop(self_ref);
@@ -542,6 +640,12 @@ impl PyBacktestEngine {
             strategy.call_method1("on_stop", (ctx,))?;
         }
 
+        // Print total backtest time
+        let total_elapsed = total_start_time.elapsed();
+        println!("[性能统计] ========== 回测总耗时 ==========");
+        println!("[性能统计] 回测总耗时: {:.3}秒", total_elapsed.as_secs_f64());
+        println!("[性能统计] ===============================\n");
+        
         // Get and return results (use immutable borrow)
         let self_immut = this.borrow();
         let stats_result = self_immut.engine.get_stats();

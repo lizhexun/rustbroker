@@ -29,7 +29,7 @@ class DoubleMAStrategy(Strategy):
         
         ctx.register_indicator("sma_5", Indicator.sma(period=5, field="close"))   # 5日均线
         ctx.register_indicator("sma_20", Indicator.sma(period=20, field="close")) # 20日均线
-        print("register sma_5 and sma_20")
+
 
     
     def _calculate_sma(self, bars, period):
@@ -40,42 +40,38 @@ class DoubleMAStrategy(Strategy):
         return sum(closes) / len(closes)
     
     def on_bar(self, ctx):
-        """每根 bar 执行一次"""
+        """每根 bar 执行一次 - 优化版本：使用批量获取指标，减少Python-Rust调用"""
+        # 缓存cash值，避免重复访问（已缓存在Context中）
+        cash = ctx.cash
+        
         for symbol in ctx.symbols:
-            # 尝试获取预计算的指标值
-            sma_short = ctx.get_indicator_value("sma_5", symbol)
-            sma_long = ctx.get_indicator_value("sma_20", symbol)
-            # 如果预计算指标不可用，使用实时计算
+            # 优化：批量获取指标值（从2次调用减少到1次）
+            indicators = ctx.get_indicator_values(symbol, ["sma_5", "sma_20"])
+            sma_short = indicators.get("sma_5")
+            sma_long = indicators.get("sma_20")
+            
+            # 如果指标不可用，跳过
             if sma_short is None or sma_long is None:
-                # 获取历史 bar 数据用于计算指标
-                bars_long = ctx.get_bars(symbol, count=20)
-                
-                if len(bars_long) < 20:
-                    continue
-                
-                # 从20根bar中计算5日均线和20日均线
-                # sma_short = self._calculate_sma(bars_long, 5)   # 从20根bar中取最后5根
-                # sma_long = self._calculate_sma(bars_long, 20)  # 使用全部20根bar
-                
-                if sma_short is None or sma_long is None:
-                    continue
+                continue
 
-            # 获取当前 bar 数据
+            # 获取当前bar数据（保持原方式，直接高效）
             bars = ctx.get_bars(symbol, count=1)
             if not bars:
                 continue
             
             current_bar = bars[0]
             close = current_bar["close"]
-            # 获取当前持仓信息
+            
+            # 获取持仓信息（从缓存的positions中获取，无需额外调用）
             pos_info = ctx.positions.get(symbol, {})
             position = pos_info.get("position", 0.0)      # 持仓数量（单位：手）
             available = pos_info.get("available", 0.0)    # 可用数量（考虑 T+1 规则）
             has_position = position > 0                   # 是否有持仓
+            
             # 双均线策略逻辑：快速均线在慢均线上面全仓买入，否则空仓
             if close > sma_short > sma_long:
                 # 快速均线在慢均线上面：全仓买入
-                if not has_position and ctx.cash > 0:
+                if not has_position and cash > 0:
                     # 当前没有持仓且有现金，执行买入
                     ctx.order.buy(symbol=symbol, quantity=1.0, quantity_type="weight")
                     
@@ -88,15 +84,15 @@ class DoubleMAStrategy(Strategy):
     
     def on_trade(self, fill, ctx):
         """订单成交回调"""
-        side_str = "买入" if fill['side'] == 'buy' else "卖出"
-        quantity_shares = fill.get('filled_quantity', 0) * 100  # 转换为股数
-        # 格式化时间
-        timestamp_str = fill.get('timestamp', '')
-        # 解析 RFC3339 格式的时间字符串
-        dt = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
-        # 转换为本地时间格式（去掉时区信息）
-        time_str = dt.strftime('%Y-%m-%d %H:%M:%S')
-        print(f"{time_str} 成交: {side_str} {fill['symbol']} {quantity_shares:.0f}股 @ {fill.get('price', 0):.4f}元 (手续费: {fill.get('commission', 0):.2f}元)")
+        # side_str = "买入" if fill['side'] == 'buy' else "卖出"
+        # quantity_shares = fill.get('filled_quantity', 0) * 100  # 转换为股数
+        # # 格式化时间
+        # timestamp_str = fill.get('timestamp', '')
+        # # 解析 RFC3339 格式的时间字符串
+        # dt = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+        # # 转换为本地时间格式（去掉时区信息）
+        # time_str = dt.strftime('%Y-%m-%d %H:%M:%S')
+        # print(f"{time_str} 成交: {side_str} {fill['symbol']} {quantity_shares:.0f}股 @ {fill.get('price', 0):.4f}元 (手续费: {fill.get('commission', 0):.2f}元)")
     
     def on_stop(self, ctx):
         """回测结束回调"""

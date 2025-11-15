@@ -47,6 +47,9 @@ impl IndicatorEngine {
 
     /// Compute all indicators for all bars
     pub fn compute_all_indicators(&mut self, datafeed: &DataFeed) {
+        use std::time::Instant;
+        let start_time = Instant::now();
+        
         // Clear existing values
         self.indicator_values.clear();
 
@@ -153,6 +156,14 @@ impl IndicatorEngine {
                 self.indicator_values.insert(key, values);
             }
         }
+        
+        // Print timing information
+        let elapsed = start_time.elapsed();
+        println!("[性能统计] 指标计算耗时: {:.3}秒 (共{}个指标, {}个symbol, {}根K线)", 
+                 elapsed.as_secs_f64(), 
+                 self.indicators.len(), 
+                 symbols.len(), 
+                 timeline_len);
     }
 
     /// Get indicator value for current bar
@@ -223,6 +234,16 @@ impl IndicatorEngine {
                 values[index] = value;
             }
         }
+    }
+
+    /// Get multiple indicator values for a symbol (batch operation)
+    pub fn get_indicator_values(&self, symbol: &str, names: &[&str]) -> std::collections::HashMap<String, Option<f64>> {
+        let mut result = std::collections::HashMap::new();
+        for name in names {
+            let value = self.get_indicator_value(name, symbol);
+            result.insert(name.to_string(), value);
+        }
+        result
     }
 }
 
